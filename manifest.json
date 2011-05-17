@@ -1,0 +1,18 @@
+{
+    "name" : "Mt Gox Ticker",
+    "version" : "0.3",
+    "description" : "Ticker updates from Mt Gox",
+    "permissions" : [
+	"tabs",
+	"http://mtgox.com/*",
+	"http://*.mtgox.com/*",
+	"https://mtgox.com/*",
+	"https://*.mtgox.com/*",
+	"ws://websocket.mtgox.com/mtgox"
+    ],
+    "popup" : "popup.html",
+    "background_page" : "background.html",
+    "browser_action" : {
+	"default_title" : ""
+    }
+}

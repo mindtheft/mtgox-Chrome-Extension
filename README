@@ -1,0 +1,5 @@
+Mt. Gox Ticker
+Hacked from Google Mail Checker
+  http://code.google.com/chrome/extensions/samples.html#bb57f7a0132cbeb36ad7e7bb0ab75c21704234ca
+
+Will use WebSocket(s) listener if found, otherwise uses XHR polling. 

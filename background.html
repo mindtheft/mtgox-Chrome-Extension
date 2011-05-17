@@ -1,0 +1,328 @@
+<html>
+<head>
+<script>
+/*
+  borrowed from Google Mail Checker
+  http://code.google.com/chrome/extensions/samples.html#bb57f7a0132cbeb36ad7e7bb0ab75c21704234ca
+*/
+
+var animationFrames = 36;
+var animationSpeed = 10; // ms
+var canvas;
+var canvasContext;
+//var loggedInImage;
+var pollIntervalMin = 1000 * 15;  // 15 seconds
+var pollIntervalMax = 1000 * 60 * 60;  // 1 hour
+var requestFailureCount = 0;  // used for exponential backoff
+var requestTimeout = 1000 * 2;  // 5 seconds
+var rotation = 0;
+var ticker = { high : 0, low : 0, vol : 0, buy : 0, sell : 0, last : 0 };
+var last_ticker = { high : 0, low : 0, vol : 0, buy : 0, sell : 0, last : 0 };
+var ticks = 'high,low,vol,buy,sell,last'.split(/,/);
+var show_ticks = 'last,buy,sell'.split(/,/);
+var loadingAnimation = new LoadingAnimation();
+
+var use_websockets = false;
+var websocket;
+
+if ("WebSocket" in window) {
+  use_websockets = true;
+}
+
+function getMtGoxUrl(ws) {
+  var url = ws ? "ws://websocket.mtgox.com/mtgox" : "https://mtgox.com/";
+  //var url = "http://www.usgn.net/";
+  if (localStorage.customDomain)
+    url += localStorage.customDomain + "/";
+  //else
+    //url += "code/"
+  return url;
+}
+
+function getFeedUrl() {
+  //return getMtGoxUrl() + "test/tick.cgi";
+  return getMtGoxUrl() + "code/data/ticker.php";
+}
+
+function isMtGoxUrl(url) {
+  // This is the Gmail we're looking for if:
+  // - starts with the correct gmail url
+  // - doesn't contain any other path chars
+  var mtgox = getMtGoxUrl();
+  if (url.indexOf(mtgox) != 0)
+    return false;
+
+  return url.length == mtgox.length || url[mtgox.length] == '?' ||
+                       url[mtgox.length] == '#';
+}
+
+// A "loading" animation displayed while we wait for the first response from
+// Gmail. This animates the badge text with a dot that cycles from left to
+// right.
+function LoadingAnimation() {
+  this.timerId_ = 0;
+  this.maxCount_ = 8;  // Total number of states in animation
+  this.current_ = 0;  // Current state
+  this.maxDot_ = 4;  // Max number of dots in animation
+}
+
+LoadingAnimation.prototype.paintFrame = function() {
+  var text = "";
+  for (var i = 0; i < this.maxDot_; i++) {
+    text += (i == this.current_) ? "." : " ";
+  }
+  if (this.current_ >= this.maxDot_)
+    text += "";
+
+  chrome.browserAction.setBadgeText({text:text});
+  this.current_++;
+  if (this.current_ == this.maxCount_)
+    this.current_ = 0;
+}
+
+LoadingAnimation.prototype.start = function() {
+  if (this.timerId_)
+    return;
+
+  var self = this;
+  this.timerId_ = window.setInterval(function() {
+    self.paintFrame();
+  }, 100);
+}
+
+LoadingAnimation.prototype.stop = function() {
+  if (!this.timerId_)
+    return;
+
+  window.clearInterval(this.timerId_);
+  this.timerId_ = 0;
+}
+
+
+chrome.tabs.onUpdated.addListener(function(tabId, changeInfo) {
+  if (changeInfo.url && isMtGoxUrl(changeInfo.url)) {
+    getTicker(function(new_ticker) {
+      updateTicker(new_ticker);
+    });
+  }
+});
+
+
+function init() {
+  canvas = document.getElementById('canvas');
+  //loggedInImage = document.getElementById('logged_in');
+  canvasContext = canvas.getContext('2d');
+
+  chrome.browserAction.setBadgeBackgroundColor({color:[208, 0, 24, 255]});
+  //chrome.browserAction.setIcon({path: "gmail_logged_in.png"});
+  loadingAnimation.start();
+  if (use_websockets) {
+      startWebSocket();
+  } else {
+      startRequest();
+  }
+}
+
+function scheduleRequest() {
+  var randomness = Math.random() * 2;
+  var exponent = Math.pow(2, requestFailureCount);
+  var delay = Math.min(randomness * pollIntervalMin * exponent,
+                       pollIntervalMax);
+  delay = Math.round(delay);
+
+  window.setTimeout(startRequest, delay);
+}
+
+// ajax stuff
+function startRequest() {
+  //console.error('we have begun');
+  //chrome.browserAction.setBadgeText({text:"?"});
+  //chrome.browserAction.setTitle({title:"startRequest"});
+
+  getTicker(
+    function(new_ticker) {
+      loadingAnimation.stop();
+      updateTicker(new_ticker);
+      scheduleRequest();
+    },
+    function() {
+      loadingAnimation.stop();
+      showLoggedOut();
+      scheduleRequest();
+    }
+  );
+}
+
+function startWebSocket() {
+  websocket = new WebSocket(getMtGoxUrl(true));
+
+  websocket.onopen = function() { 
+    // unsubscribe from trades
+    //websocket.send(JSON.stringify({op:'unsubscribe', channel : 'dbf1dee9-4f2e-4a08-8cb7-748919a71b21'}));
+    // unsubscribe from depth
+    websocket.send(JSON.stringify({op:'unsubscribe', channel : '24e67e0d-1cad-4cc0-9e7a-f8523ef460fe'}));
+    loadingAnimation.stop();
+  };
+
+  websocket.onmessage = function(evt) {
+      var new_ticker = JSON.parse(evt.data);
+      if (new_ticker.ticker) {
+	  new_ticker.ticker.last = ticker.last;
+	  //console.log(' kept ticker.last same ' + ticker.last);
+	  updateTicker(new_ticker.ticker);
+      } else if (new_ticker.trade) {
+          ticker.last = new_ticker.trade.price;
+	  updateTicker(ticker);
+      }
+  };
+}
+
+function getTicker(onSuccess, onError) {
+  var xhr = new XMLHttpRequest();
+  var abortTimerId = window.setTimeout(function() {
+    xhr.abort();  // synchronously calls onreadystatechange
+  }, requestTimeout);
+
+  function handleSuccess(count) {
+    requestFailureCount = 0;
+    window.clearTimeout(abortTimerId);
+    if (onSuccess)
+      onSuccess(count);
+  }
+
+  function handleError() {
+    ++requestFailureCount;
+    window.clearTimeout(abortTimerId);
+    if (onError)
+      onError();
+  }
+
+  try {
+    xhr.onreadystatechange = function(){
+    //chrome.browserAction.setTitle({title:"onreadystatechange " + xhr.readyState });
+      if (xhr.readyState != 4)
+        return;
+
+    //chrome.browserAction.setTitle({title:"xhr " + xhr });
+      if (xhr.responseText) {
+        //chrome.browserAction.setTitle({title:"got response"});
+        var new_ticker = JSON.parse(xhr.responseText);
+        if (new_ticker && new_ticker.ticker) {
+          handleSuccess(new_ticker.ticker);
+          return;
+        } else {
+          //console.error(chrome.i18n.getMessage("gmailcheck_node_error"));
+          console.error('unable to parse mt gox ticker [ticker has no "ticker"?]');
+        }
+      }
+
+      handleError();
+    }
+
+    xhr.onerror = function(error) {
+      handleError();
+    }
+
+      //chrome.browserAction.setTitle({title:"sending request " + getFeedUrl() });
+    xhr.open("GET", getFeedUrl(), true);
+    xhr.send(null);
+  } catch(e) {
+    //console.error(chrome.i18n.getMessage("gmailcheck_exception", e));
+    console.error('unable to retrieve mt gox ticker [' + e.message + ']');
+    handleError();
+  }
+}
+
+function updateTicker(new_ticker) {
+  var do_flip = false;
+  ticks.forEach(function(tick) {
+    if (ticker[tick] != new_ticker[tick]) {
+	last_ticker[tick] = ticker[tick];
+	ticker[tick] = new_ticker[tick];
+	do_flip = true;
+    }
+  });
+  if (do_flip) {
+    animateFlip();
+  }
+}
+
+
+function ease(x) {
+  return (1-Math.sin(Math.PI/2+x*Math.PI))/2;
+}
+
+function animateFlip() {
+  rotation += 1/animationFrames;
+  drawIconAtRotation();
+
+  if (rotation <= 1) {
+    setTimeout("animateFlip()", animationSpeed);
+  } else {
+    rotation = 0;
+    drawIconAtRotation();
+    chrome.browserAction.setBadgeText({ text: "" });
+    //chrome.browserAction.setBadgeBackgroundColor({color:[208, 0, 24, 255]});
+  }
+}
+
+function showLoggedOut() {
+  //unreadCount = -1;
+  //chrome.browserAction.setIcon({path:"gmail_not_logged_in.png"});
+  //chrome.browserAction.setBadgeBackgroundColor({color:[190, 190, 190, 230]});
+  //chrome.browserAction.setBadgeText({text:"?"});
+}
+
+function drawIconAtRotation(font) {
+  canvasContext.save();
+  canvasContext.clearRect(0, 0, canvas.width, canvas.height);
+  canvasContext.font = font || '7px Verdana';
+  //canvasContext.fillStyle = 'Black';
+
+  var h = 5;
+  show_ticks.forEach(function(tick) {
+      canvasContext.fillStyle = last_ticker[tick] == 0           ? 'Black'
+                              : ticker[tick] > last_ticker[tick] ? 'Green'
+			      : ticker[tick] < last_ticker[tick] ? 'Red'
+			      :                                    'Black'
+			      ;
+
+      canvasContext.fillText(ticker[tick], 0, h);
+      h += 7;
+  });
+
+  //canvasContext.restore();
+
+  var title = [];
+  ticks.forEach(function(tick) {
+    title.push(tick + ': ' + ticker[tick]);
+  });
+  chrome.browserAction.setTitle({title: (use_websockets ? 'WebSocket: ' : 'XHR') + title.join(', ')});
+  chrome.browserAction.setIcon({imageData:canvasContext.getImageData(0, 0, canvas.width,canvas.height)});
+}
+
+function goToMtGox() {
+  chrome.tabs.getAllInWindow(undefined, function(tabs) {
+    for (var i = 0, tab; tab = tabs[i]; i++) {
+      if (tab.url && isMtGoxUrl(tab.url)) {
+        chrome.tabs.update(tab.id, {selected: true});
+        return;
+      }
+    }
+    chrome.tabs.create({url: getMtGoxUrl()});
+  });
+}
+
+// Called when the user clicks on the browser action.
+chrome.browserAction.onClicked.addListener(function(tab) {
+  goToMtGox();
+});
+
+</script>
+</head>
+<body onload="init()">
+<!--img id="logged_in" src="gmail_logged_in.png"-->
+<canvas id="canvas" width="19" height="19">
+</body>
+</html>
+
